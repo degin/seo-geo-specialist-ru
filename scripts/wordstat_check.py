@@ -17,6 +17,12 @@
     python wordstat_check.py "купить телефон" --regions 213,1 --num-phrases 20
     python wordstat_check.py --regions-tree                    # список регионов (бесплатно)
     python wordstat_check.py "купить телефон" --json           # машиночитаемый вывод
+
+    # Пакетная проверка — вместо разового скрипта на каждый разбор ядра:
+    python wordstat_check.py --batch-file phrases.txt --regions 38 --out results.json
+    (phrases.txt — по одной фразе на строку; --delay регулирует паузу между запросами,
+     по умолчанию 1 сек — этого достаточно, чтобы не упираться в лимит 10 запросов/сек;
+     повтор на 429 уже встроен, отдельный backoff в вызывающем коде не нужен)
 """
 
 import argparse
@@ -72,29 +78,39 @@ def get_config() -> tuple[str, str]:
     return folder_id, api_key
 
 
-def call_api(endpoint: str, folder_id: str, api_key: str, body: dict) -> dict:
-    resp = requests.post(
-        f"{API_HOST}{endpoint}",
-        json={**body, "folderId": folder_id},
-        headers={
-            "Authorization": f"Api-Key {api_key}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-        timeout=30,
-    )
-    if resp.status_code == 429:
-        sys.exit("Rate limit (429) — подожди и повтори запрос.")
-    if resp.status_code == 401:
-        sys.exit("401: недействительный API-ключ.")
-    if resp.status_code == 403:
-        sys.exit("403: доступ запрещён — проверь роль search-api.webSearch.user у сервисного аккаунта.")
-    if resp.status_code >= 400:
-        try:
-            detail = resp.json()
-        except ValueError:
-            detail = resp.text
-        sys.exit(f"Ошибка API {resp.status_code}: {detail}")
-    return resp.json()
+def call_api(endpoint: str, folder_id: str, api_key: str, body: dict, max_retries: int = 5, base_delay: float = 3.0) -> dict:
+    """Официальный лимит — 10 запросов/сек, 10 000/час на topRequests (aistudio.yandex.ru/docs/ru/search-api/concepts/limits).
+    429 при аккуратном использовании — это всплеск, не исчерпанная квота: ждём и повторяем сами,
+    вместо того чтобы каждый вызывающий скрипт заново изобретал бэкофф."""
+    for attempt in range(max_retries + 1):
+        resp = requests.post(
+            f"{API_HOST}{endpoint}",
+            json={**body, "folderId": folder_id},
+            headers={
+                "Authorization": f"Api-Key {api_key}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            timeout=30,
+        )
+        if resp.status_code == 429:
+            if attempt >= max_retries:
+                sys.exit(f"Rate limit (429) — не отступил после {max_retries} повторов, попробуй позже.")
+            retry_after = resp.headers.get("Retry-After")
+            delay = float(retry_after) if retry_after else base_delay * (2 ** attempt)
+            print(f"429, жду {delay:.0f} сек и повторяю ({attempt + 1}/{max_retries})…", file=sys.stderr)
+            time.sleep(delay)
+            continue
+        if resp.status_code == 401:
+            sys.exit("401: недействительный API-ключ.")
+        if resp.status_code == 403:
+            sys.exit("403: доступ запрещён — проверь роль search-api.webSearch.user у сервисного аккаунта.")
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json()
+            except ValueError:
+                detail = resp.text
+            sys.exit(f"Ошибка API {resp.status_code}: {detail}")
+        return resp.json()
 
 
 def top_requests(phrase: str, folder_id: str, api_key: str, regions: list[str], devices: list[str], num_phrases: int) -> dict:
@@ -147,6 +163,29 @@ def print_regions(data: dict, limit: int = 60) -> None:
     print(f"\n(показаны первые {limit}; используй --json для полного списка)")
 
 
+def run_batch(phrases: list[str], folder_id: str, api_key: str, regions: list[str], devices: list[str],
+              num_phrases: int, delay: float, out_path: str | None) -> None:
+    """Частотность по списку фраз за один прогон — вместо одноразового скрипта на каждый разбор.
+    delay между вызовами держим консервативным (лимит API — 10/сек), retry на 429 уже внутри call_api."""
+    results = []
+    for i, phrase in enumerate(phrases):
+        try:
+            data = top_requests(phrase, folder_id, api_key, regions, devices, num_phrases)
+            total = int(data.get("totalCount", 0) or 0)
+            results.append({"phrase": phrase, "totalCount": total})
+            print(f"{total:>8,}  {phrase}".replace(",", " "), flush=True)
+        except SystemExit as e:
+            print(f"ERROR  {phrase}: {e}", file=sys.stderr, flush=True)
+            results.append({"phrase": phrase, "totalCount": None, "error": str(e)})
+        if i < len(phrases) - 1:
+            time.sleep(delay)
+
+    if out_path:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"\nСохранено: {out_path}", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("phrase", nargs="?", help="Фраза для проверки частотности")
@@ -155,6 +194,9 @@ def main() -> None:
     parser.add_argument("--num-phrases", type=int, default=50, help="Сколько связанных фраз вернуть (по умолчанию 50, максимум 2000)")
     parser.add_argument("--regions-tree", action="store_true", help="Показать дерево регионов (бесплатно) вместо проверки частотности")
     parser.add_argument("--json", action="store_true", help="Вывести сырой JSON вместо форматированного текста")
+    parser.add_argument("--batch-file", default="", help="Файл со списком фраз (по одной на строку) — частотность по всем за один прогон")
+    parser.add_argument("--delay", type=float, default=1.0, help="Пауза между запросами в батче, сек (по умолчанию 1.0 — держит нас в пределах 10 запросов/сек)")
+    parser.add_argument("--out", default="", help="Путь для сохранения результатов батча в JSON")
     args = parser.parse_args()
 
     folder_id, api_key = get_config()
@@ -164,8 +206,15 @@ def main() -> None:
         print(json.dumps(data, ensure_ascii=False, indent=2)) if args.json else print_regions(data)
         return
 
+    if args.batch_file:
+        regions = [r.strip() for r in args.regions.split(",") if r.strip()]
+        devices = [d.strip() for d in args.devices.split(",") if d.strip()]
+        phrases = [line.strip() for line in Path(args.batch_file).read_text(encoding="utf-8").splitlines() if line.strip()]
+        run_batch(phrases, folder_id, api_key, regions, devices, args.num_phrases, args.delay, args.out or None)
+        return
+
     if not args.phrase:
-        parser.error("укажи фразу для проверки, либо используй --regions-tree")
+        parser.error("укажи фразу для проверки, либо используй --regions-tree / --batch-file")
 
     regions = [r.strip() for r in args.regions.split(",") if r.strip()]
     devices = [d.strip() for d in args.devices.split(",") if d.strip()]
