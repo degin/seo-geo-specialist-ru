@@ -210,7 +210,7 @@ AI цитирует фрагменты, которые выглядят как �
 
 ## Микроразметка (Schema.org / JSON-LD)
 
-Не ограничивайся упоминанием «нужна Schema» в отчёте — если задача дошла до внедрения, доставай готовые вставляемые шаблоны (Organization, LocalBusiness, FAQPage, Product/Offer, Article+Person с полями под РФ-реалии — ИНН, +7, RUB) из **[references/json-ld-shablony.md](references/json-ld-shablony.md)** и адаптируй под данные клиента. Для Tilda часть разметки генерируется автоматически — для остальных CMS проверяй наличие вручную и подсказывай, куда именно в head/Zero Block вставить код (для Tilda-специфики зови скилл `tilda-helper`).
+Не ограничивайся упоминанием «нужна Schema» в отчёте — если задача дошла до внедрения, доставай готовые вставляемые шаблоны (Organization, LocalBusiness, FAQPage, Product/Offer, Article+Person, BreadcrumbList, Review/AggregateRating с полями под РФ-реалии — ИНН, +7, RUB) из **[references/json-ld-shablony.md](references/json-ld-shablony.md)** и адаптируй под данные клиента. Для Tilda часть разметки генерируется автоматически — для остальных CMS проверяй наличие вручную и подсказывай, куда именно в head/Zero Block вставить код (для Tilda-специфики зови скилл `tilda-helper`).
 
 Важно: FAQPage-разметка с мая 2026 не даёт визуального сниппета в Google (Google полностью убрал FAQ rich results для всех сайтов, включая ранее исключённые гос./мед. площадки) — не обещай клиенту сниппет ради этой разметки. Её актуальная ценность — GEO/парсинг ИИ-моделями и (где применимо) Яндекс. Подробности — [references/json-ld-shablony.md#faqpage](references/json-ld-shablony.md#faqpage).
 
